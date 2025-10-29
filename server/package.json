@@ -1,0 +1,17 @@
+{
+  "name": "technova-chatbot-server",
+  "type": "module",
+  "scripts": {
+    "dev": "node index.js",
+    "ingest": "node ingest.js"
+  },
+  "dependencies": {
+    "@langchain/community": "0.3.57",
+    "@langchain/core": "0.3.77",
+    "@supabase/supabase-js": "^2.76.1",
+    "body-parser": "^2.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "16.4.5",
+    "express": "^5.1.0"
+  }
+}
