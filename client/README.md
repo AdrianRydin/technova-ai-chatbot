@@ -1,16 +1,69 @@
-# React + Vite
+# TechNova AI Kundservice Chatbot
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Tech Stack
 
-Currently, two official plugins are available:
+**Frontend:** React + TailwindCSS  
+**Backend:** Express.js + LangChain.js  
+**AI Models:**
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- `llama3.1:8b` (chat model)
+- `nomic-embed-text` (embeddings model)  
+  **Database:** Supabase (PostgreSQL + vector extension)
 
-## React Compiler
+---
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Requirements
 
-## Expanding the ESLint configuration
+- Node.js **v20+** (or v22)
+- [Ollama](https://ollama.com/download) installed and running locally
+- Supabase project with the provided keys (already included in `.env`)
+- Policy/FAQ document ingested into Supabase
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+---
+
+## Quick Start
+
+### Install Ollama models
+
+Open PowerShell and run:
+
+```powershell
+ollama serve
+ollama pull llama3.1:8b
+ollama pull nomic-embed-text
+```
+
+# Backend setup
+
+```
+cd server
+npm install
+```
+
+## (Optional) Reindex the FAQ document
+
+```
+node ingest.js
+```
+
+# Start the backend
+
+```
+node index.js
+```
+
+# Expected output
+
+```
+API up on :8787
+```
+
+# Frontend setup
+
+## In a new powershell/cmd window
+
+```
+cd client
+npm install
+npm run dev
+```
