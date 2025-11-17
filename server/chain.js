@@ -1,9 +1,16 @@
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
+import { ChatOllama } from "@langchain/ollama";
+import { ChatPromptTemplate } from "@langchain/core/prompts";
+import {
+  RunnableSequence,
+  RunnablePassthrough,
+} from "@langchain/core/runnables";
+import { StringOutputParser } from "@langchain/core/output_parsers";
 
 const {
   OLLAMA_BASE_URL = "http://127.0.0.1:11434",
-  OLLAMA_MODEL = "qwen2.5:7b-instruct",
+  OLLAMA_MODEL = "llama3.1:8b",
   EMBED_MODEL = "nomic-embed-text",
   SUPABASE_URL,
   SUPABASE_PRIVATE_KEY,
@@ -14,26 +21,6 @@ if (!SUPABASE_URL || !SUPABASE_PRIVATE_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_PRIVATE_KEY);
-
-/* ------------ OLLAMA HELPERS ------------ */
-async function ollamaGenerate(prompt) {
-  const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: OLLAMA_MODEL,
-      prompt,
-      stream: false,
-      options: { temperature: 0.2, num_predict: 512 },
-    }),
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`Ollama generate failed: ${res.status} ${t}`);
-  }
-  const json = await res.json();
-  return String(json.response ?? "");
-}
 
 async function ollamaEmbed(text) {
   const res = await fetch(`${OLLAMA_BASE_URL}/api/embed`, {
@@ -82,36 +69,85 @@ function formatContext(docs) {
     .join("\n\n");
 }
 
-function domainPrompt(question) {
-  return `Svara endast JA eller NEJ.
-Gäller användarens fråga TechNova AB:s produkter, leveranser, garantier, eller info i företagets FAQ/policydokument?
+const chatModel = new ChatOllama({
+  baseUrl: OLLAMA_BASE_URL,
+  model: OLLAMA_MODEL,
+  temperature: 0.2,
+});
 
-Fråga: ${question}`;
-}
+const DOMAIN_PROMPT = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `Svara endast JA eller NEJ.
+Gäller användarens fråga TechNova AB:s produkter, leveranser, garantier, eller info i företagets FAQ/policydokument?`,
+  ],
+  ["user", "{question}"],
+]);
 
-function refusalPrompt(question) {
-  return `Du svarar bara på frågor om TechNova AB, dess produkter, leveranser, garantier eller FAQ/policy.
-Om något ligger utanför detta: svara vänligt på svenska att du inte kan hjälpa med den typen av fråga och föreslå vad du kan svara på.
+const REFUSAL_PROMPT = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `Du svarar bara på frågor om TechNova AB, dess produkter, leveranser, garantier eller FAQ/policy.
+Om något ligger utanför detta: svara vänligt på svenska att du inte kan hjälpa med den typen av fråga och föreslå vad du kan svara på.`,
+  ],
+  ["user", "{question}"],
+]);
 
-Fråga: ${question}`;
-}
-
-function qaPrompt(question, context) {
-  return `Du är TechNova AB:s kundsupportassistent. Svara KORT, sakligt och på svenska.
+const QA_PROMPT = ChatPromptTemplate.fromMessages([
+  [
+    "system",
+    `Du är TechNova AB:s kundsupportassistent. Svara KORT, sakligt och på svenska.
 Använd endast information från KONTEKST. Om du använder dokumenten, lista fotnoter [1], [2], ... och ange sektion & rubrik (t.ex. "§4 Retur- och återbetalningspolicy – Ångerrätt").
-Om svaret inte finns i kontexten, säg att du inte hittar det i FAQ/policy och hänvisa till supportmail (support@technova.se).
+Om svaret inte finns i kontexten, säg att du inte hittar det i FAQ/policy och hänvisa till supportmail (support@technova.se).`,
+  ],
+  ["system", "KONTEKST:\n{context}"],
+  ["user", "{question}"],
+]);
 
-KONTEKST:
-${context}
+const classifyChain = RunnableSequence.from([
+  DOMAIN_PROMPT,
+  chatModel,
+  new StringOutputParser(),
+]);
 
-FRÅGA:
-${question}`;
-}
+const refusalChain = RunnableSequence.from([
+  REFUSAL_PROMPT,
+  chatModel,
+  new StringOutputParser(),
+]);
+
+const ragChain = RunnableSequence.from([
+  // Steg 1: hämta dokument och bygg kontext
+  async (input) => {
+    const docs = await retrieveDocs(input.question, 6);
+    const context = formatContext(docs);
+    return { ...input, docs, context };
+  },
+  // Steg 2: kör QA-prompten med modellen och parsa svaret
+  RunnablePassthrough.assign({
+    answer: QA_PROMPT.pipe(chatModel).pipe(new StringOutputParser()),
+  }),
+  // Steg 3: forma slutligt svar + citations
+  (obj) => {
+    const citations = (obj.docs || []).map((d, i) => ({
+      id: i + 1,
+      section: d.metadata?.section,
+      heading: d.metadata?.heading,
+      source: d.metadata?.source,
+    }));
+
+    return {
+      text: obj.answer,
+      citations,
+    };
+  },
+]);
 
 export async function ask(messages) {
   const msgs = Array.isArray(messages) ? messages : [];
   const lastUser = [...msgs].reverse().find((m) => m.role === "user");
   const question = lastUser?.content?.trim() || "";
+
   if (!question) {
     return {
       text: "Jag behöver en fråga för att kunna hjälpa till.",
@@ -119,34 +155,23 @@ export async function ask(messages) {
     };
   }
 
-  console.log("STEP 1: Domänvakten...");
-  const dom = (await ollamaGenerate(domainPrompt(question)))
-    .trim()
-    .toUpperCase();
+  console.log("STEP 1: Domänvakten via LangChain...");
+  const dom = (await classifyChain.invoke({ question })).trim().toUpperCase();
   console.log("STEP 2: Domain result =", dom);
 
+  // Utanför TechNova-domänen → använd refusalChain
   if (dom.startsWith("NEJ")) {
-    const refusal = await ollamaGenerate(refusalPrompt(question));
-    console.log("STEP 3: Refusal generated");
-    return { text: refusal, citations: [] };
+    console.log("STEP 3: Out-of-domain, generating refusal via LangChain...");
+    const refusalText = await refusalChain.invoke({ question });
+    return { text: refusalText, citations: [] };
   }
 
-  console.log("STEP 4: Retrieval...");
-  const docs = await retrieveDocs(question, 6);
-  console.log("STEP 5: Docs retrieved =", docs.length);
+  console.log("STEP 4: In-domain, running RAG chain...");
+  const result = await ragChain.invoke({ question });
+  console.log(
+    "STEP 5: RAG chain done, answer length =",
+    result.text?.length || 0
+  );
 
-  console.log("STEP 6: QA prompt...");
-  const context = formatContext(docs);
-  const answer = await ollamaGenerate(qaPrompt(question, context));
-  console.log("STEP 7: Answer length =", answer.length);
-
-  const citations = (docs || []).map((d, i) => ({
-    id: i + 1,
-    section: d.metadata?.section,
-    heading: d.metadata?.heading,
-    source: d.metadata?.source,
-  }));
-
-  console.log("STEP 8: Returning answer");
-  return { text: answer, citations };
+  return result;
 }
